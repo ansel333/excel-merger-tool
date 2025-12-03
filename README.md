@@ -49,27 +49,26 @@ Download the `Excel表格合并工具.exe` from the [Releases](../../releases) p
 
 ### Using the GUI application
 
-1. **Run the application**:
-   ```bash
-   python excel_merger_gui.py
-   ```
-   Or on Windows with standalone executable: Double-click `Excel表格合并工具.exe`
-
-2. **Select Excel files**:
-   - Click "📁 Select Files" button
+1. **Select Excel files**:
+   - Click "Select Files" button
    - Choose one or more Excel files (`.xlsx` or `.xls`)
 
-3. **Read sheets**:
-   - Click "📖 Read Sheets" to scan the selected files
+2. **Read sheets**:
+   - Click "Read Sheets" to scan the selected files
    - The first file's sheet list will be displayed
+   - Default output directory is automatically set to the directory of the first file
 
-4. **Configure merge settings**:
+3. **Configure merge settings**:
    - Select the target sheet to merge from the dropdown
    - Set the number of header rows (default: 1)
 
+4. **Choose output directory** (Optional):
+   - Click "Browse..." button to select a different output directory
+   - Default directory is the location of the first selected file
+
 5. **Merge and save**:
-   - Click "✅ Start Merge" to begin the merging process
-   - The merged file will be saved with a timestamp in the current directory
+   - Click "Start Merge" to begin the merging process
+   - The merged file will be saved to the selected directory
    - Output format: `合并结果_{SheetName}_{YYYYMMDD_HHMMSS}.xlsx`
 
 ### Python API

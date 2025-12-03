@@ -9,10 +9,9 @@ import sys
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QListWidget, QFileDialog, QSpinBox,
-    QLabel, QTextEdit, QMessageBox, QComboBox, QFrame, QAbstractSpinBox
+    QLabel, QTextEdit, QMessageBox, QComboBox
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
 
 from styles import get_stylesheet
 from merger import ExcelMerger
@@ -25,125 +24,104 @@ class ExcelMergerGUI(QMainWindow):
         self.sheet_names = []
         self.header_rows_count = 1
         self.selected_files = []
+        self.target_directory = None
         self.init_ui()
         self.setStyleSheet(get_stylesheet())
     
     def init_ui(self):
         """初始化用户界面"""
         self.setWindowTitle("Excel表格合并工具")
-        self.setGeometry(100, 100, 850, 650)
+        self.setGeometry(100, 100, 700, 550)
         
-        # 创建中夅窗口
+        # 创建中心窗口
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
         # 主布局
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(12, 12, 12, 12)
-        main_layout.setSpacing(10)
+        main_layout.setSpacing(8)
         
-        # 标题
-        title = QLabel("Excel表格合并工具")
-        title_font = QFont()
-        title_font.setPointSize(13)
-        title_font.setBold(True)
-        title.setFont(title_font)
-        title.setStyleSheet("color: #4a90e2;")
-        main_layout.addWidget(title)
-        
-        # 分隔线
-        separator1 = QFrame()
-        separator1.setFrameShape(QFrame.Shape.HLine)
-        separator1.setStyleSheet("background-color: #d0d0d0;")
-        separator1.setFixedHeight(1)
-        main_layout.addWidget(separator1)
-        
-        # ========== 第一部分：文件选择 ==========
-        file_section_layout = QHBoxLayout()
-        file_section_layout.setSpacing(8)
-        file_label = QLabel("步骤 1: 选择要合并的 Excel 文件")
-        file_label.setProperty("heading", True)
-        self.btn_select_files = QPushButton("📁 选择文件")
+        # 步骤 1: 选择要合并的 Excel 文件
+        step1_layout = QHBoxLayout()
+        step1_layout.setSpacing(8)
+        step1_label = QLabel("步骤 1: 选择要合并的 Excel 文件")
+        self.btn_select_files = QPushButton("选择文件")
         self.btn_select_files.clicked.connect(self.select_files)
-        self.btn_select_files.setObjectName("btnPrimary")
-        file_section_layout.addWidget(file_label, 0)
-        file_section_layout.addWidget(self.btn_select_files)
-        file_section_layout.addStretch()
-        main_layout.addLayout(file_section_layout)
+        step1_layout.addWidget(step1_label)
+        step1_layout.addStretch()
+        step1_layout.addWidget(self.btn_select_files)
+        main_layout.addLayout(step1_layout)
         
         self.files_list = QListWidget()
-        self.files_list.setObjectName("filesList")
-        self.files_list.setMaximumHeight(90)
-        self.files_list.setSpacing(0)
+        self.files_list.setMaximumHeight(80)
         main_layout.addWidget(self.files_list)
         
-        # ========== 第二部分：读取Sheet ==========
-        sheet_section_layout = QHBoxLayout()
-        sheet_section_layout.setSpacing(8)
-        sheet_label = QLabel("步骤 2: 读取 Sheet 列表")
-        sheet_label.setProperty("heading", True)
-        
-        self.btn_read_sheets = QPushButton("📖 读取 Sheet")
+        # 步骤 2: 读取 Sheet 列表
+        step2_layout = QHBoxLayout()
+        step2_layout.setSpacing(8)
+        step2_label = QLabel("步骤 2: 读取 Sheet 列表")
+        self.btn_read_sheets = QPushButton("读取 Sheet")
         self.btn_read_sheets.clicked.connect(self.read_sheets)
         self.btn_read_sheets.setEnabled(False)
-        self.btn_read_sheets.setObjectName("btnSecondary")
-        sheet_section_layout.addWidget(sheet_label, 0)
-        sheet_section_layout.addWidget(self.btn_read_sheets)
-        sheet_section_layout.addStretch()
-        main_layout.addLayout(sheet_section_layout)
+        step2_layout.addWidget(step2_label)
+        step2_layout.addStretch()
+        step2_layout.addWidget(self.btn_read_sheets)
+        main_layout.addLayout(step2_layout)
         
-        # ========== 第三部分：选择Sheet和表头行数 ==========
-        config_section_layout = QVBoxLayout()
-        config_section_layout.setSpacing(6)
-        config_label = QLabel("步骤 3: 选择 Sheet 和设置表头行数")
-        config_label.setProperty("heading", True)
-        config_section_layout.addWidget(config_label)
+        # 步骤 3: 选择 Sheet 和设置表头行数
+        step3_label = QLabel("步骤 3: 选择 Sheet 和设置表头行数")
+        main_layout.addWidget(step3_label)
         
-        # Sheet选择和表头行数在同一行
         sheet_select_layout = QHBoxLayout()
         sheet_select_layout.setSpacing(8)
         sheet_select_layout.addWidget(QLabel("选择 Sheet:"))
         self.sheet_combo = QComboBox()
-        self.sheet_combo.setObjectName("sheetCombo")
-        sheet_select_layout.addWidget(self.sheet_combo, 1)
-        sheet_select_layout.addWidget(QLabel("表头行数:"), 0)
+        sheet_select_layout.addWidget(self.sheet_combo, 2)
+        sheet_select_layout.addWidget(QLabel("表头行数:"))
         self.header_spinbox = QSpinBox()
-        self.header_spinbox.setObjectName("headerSpinBox")
         self.header_spinbox.setMinimum(1)
         self.header_spinbox.setValue(1)
-        self.header_spinbox.setMaximumWidth(60)
-        self.header_spinbox.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
-        sheet_select_layout.addWidget(self.header_spinbox, 0)
-        config_section_layout.addLayout(sheet_select_layout)
+        self.header_spinbox.setMinimumWidth(80)
+        sheet_select_layout.addWidget(self.header_spinbox, 1)
+        main_layout.addLayout(sheet_select_layout)
         
-        main_layout.addLayout(config_section_layout)
+        # 步骤 4: 选择目标目录
+        step4_label = QLabel("步骤 4: 选择目标目录")
+        main_layout.addWidget(step4_label)
         
-        # ========== 第四部分：合并 ==========
-        merge_section_layout = QHBoxLayout()
-        merge_section_layout.setSpacing(8)
-        merge_label = QLabel("步骤 4: 执行合并")
-        merge_label.setProperty("heading", True)
+        target_dir_layout = QHBoxLayout()
+        target_dir_layout.setSpacing(8)
+        target_dir_layout.addWidget(QLabel("目标目录:"))
+        self.target_dir_display = QLabel("未选择")
+        self.target_dir_display.setStyleSheet("color: #999999;")
+        target_dir_layout.addWidget(self.target_dir_display, 1)
+        self.btn_select_dir = QPushButton("浏览...")
+        self.btn_select_dir.clicked.connect(self.select_target_directory)
+        self.btn_select_dir.setEnabled(False)
+        target_dir_layout.addWidget(self.btn_select_dir)
+        main_layout.addLayout(target_dir_layout)
         
-        self.btn_merge = QPushButton("✅ 开始合并")
-        self.btn_merge.setObjectName("btnMerge")
+        # 步骤 5: 执行合并
+        step5_layout = QHBoxLayout()
+        step5_layout.setSpacing(8)
+        step5_label = QLabel("步骤 5: 执行合并")
+        self.btn_merge = QPushButton("开始合并")
         self.btn_merge.clicked.connect(self.merge_files)
         self.btn_merge.setEnabled(False)
-        merge_section_layout.addWidget(merge_label, 0)
-        merge_section_layout.addWidget(self.btn_merge)
-        merge_section_layout.addStretch()
+        step5_layout.addWidget(step5_label)
+        step5_layout.addStretch()
+        step5_layout.addWidget(self.btn_merge)
+        main_layout.addLayout(step5_layout)
         
-        main_layout.addLayout(merge_section_layout)
-        
-        # ========== 日志输出 ==========
-        log_label = QLabel("📝 日志输出:")
-        log_label.setProperty("heading", True)
+        # 日志输出
+        log_label = QLabel("日志:")
         main_layout.addWidget(log_label)
         
         self.log_text = QTextEdit()
-        self.log_text.setObjectName("logBox")
         self.log_text.setReadOnly(True)
-        self.log_text.setMinimumHeight(100)
-        main_layout.addWidget(self.log_text, 1)  # 伸缩因子为 1，自动填充剩余空间
+        self.log_text.setMinimumHeight(150)
+        main_layout.addWidget(self.log_text, 1)
         
         central_widget.setLayout(main_layout)
     
@@ -186,7 +164,16 @@ class ExcelMergerGUI(QMainWindow):
             for i, sheet in enumerate(self.sheet_names, 1):
                 self.log(f"  {i}. {sheet}")
             
-            self.btn_merge.setEnabled(True)
+            # 设置默认目标目录为第一个文件所在的目录
+            default_dir = os.path.dirname(os.path.abspath(first_file))
+            self.target_directory = default_dir
+            self.target_dir_display.setText(default_dir)
+            self.target_dir_display.setStyleSheet("color: #333333;")
+            self.log(f"默认目标目录: {default_dir}")
+            
+            # 启用目录选择按钮
+            self.btn_select_dir.setEnabled(True)
+            self.update_merge_button_state()
             
         except Exception as e:
             QMessageBox.critical(self, "错误", f"读取 Sheet 失败: {e}")
@@ -202,6 +189,10 @@ class ExcelMergerGUI(QMainWindow):
             QMessageBox.warning(self, "警告", "请先读取 Sheet 列表！")
             return
         
+        if not self.target_directory:
+            QMessageBox.warning(self, "警告", "请先选择目标目录！")
+            return
+        
         target_sheet = self.sheet_combo.currentText()
         self.header_rows_count = self.header_spinbox.value()
         
@@ -212,6 +203,7 @@ class ExcelMergerGUI(QMainWindow):
         try:
             self.log(f"\n开始合并 Sheet: {target_sheet}")
             self.log(f"表头行数: {self.header_rows_count}")
+            self.log(f"目标目录: {self.target_directory}")
             
             # 进行合并
             header_rows, data_rows, file_order = ExcelMerger.merge_sheets(
@@ -224,9 +216,9 @@ class ExcelMergerGUI(QMainWindow):
             
             self.log(f"合并完成！总共合并了 {len(data_rows)} 行数据")
             
-            # 保存文件
+            # 保存文件到目标目录
             output_path = ExcelMerger.create_output_file(
-                header_rows, data_rows, target_sheet, file_order, self.sheet_names, "."
+                header_rows, data_rows, target_sheet, file_order, self.sheet_names, self.target_directory
             )
             
             if output_path:
@@ -248,6 +240,30 @@ class ExcelMergerGUI(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "错误", f"合并失败: {e}")
             self.log(f"错误: {e}")
+    
+    def select_target_directory(self):
+        """选择目标目录"""
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "选择目标目录",
+            self.target_directory or "."
+        )
+        
+        if directory:
+            self.target_directory = directory
+            self.target_dir_display.setText(directory)
+            self.target_dir_display.setStyleSheet("color: #333333;")
+            self.log(f"已选择目标目录: {directory}")
+            self.update_merge_button_state()
+    
+    def update_merge_button_state(self):
+        """更新合并按钮的状态"""
+        can_merge = (
+            self.selected_files and 
+            self.sheet_names and 
+            self.target_directory is not None
+        )
+        self.btn_merge.setEnabled(can_merge)
     
     def log(self, message):
         """输出日志"""
