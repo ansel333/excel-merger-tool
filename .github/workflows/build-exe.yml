@@ -4,14 +4,8 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'excel_merger_gui.py'
-      - 'merger.py'
-      - 'styles.py'
-      - 'excel_merger.spec'
-      - 'requirements.txt'
   release:
-    types: [created]
+    types: [published]
   workflow_dispatch:
 
 jobs:
