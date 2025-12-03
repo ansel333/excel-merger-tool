@@ -1,6 +1,15 @@
 name: Build Windows Executable
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'excel_merger_gui.py'
+      - 'merger.py'
+      - 'styles.py'
+      - 'excel_merger.spec'
+      - 'requirements.txt'
   release:
     types: [created]
   workflow_dispatch:
@@ -33,6 +42,7 @@ jobs:
       with:
         name: excel-merger-tool
         path: dist/Excel表格合并工具.exe
+        retention-days: 30
 
     - name: Upload to Release
       if: github.event_name == 'release'
