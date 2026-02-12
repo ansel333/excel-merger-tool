@@ -2,6 +2,7 @@
 
 ## v1.1.0 - 2026-02-12
 
+- chore(release): pre-release auto-commit (93f1409)
 - chore(release): v1.1.0 (66687b9)
 - chore(release): pre-release auto-commit (4d4a234)
 - chore(release): v1.1.0 (b788d2e)
@@ -9,8 +10,6 @@
 - refactor: default to first sheet if target missing; remove per-file dialog (1d19b07)
 - feat: add testing_files to .gitignore (ad0904f)
 - feat: add sheet selection dialog and build scripts (0ef633a)
-
-
 - (auto-added) tagged commit: b788d2e chore(release): v1.1.0
 
 ## v1.0.3 - 2025-12-03
@@ -24,5 +23,4 @@
 ## v1.0.1 - 2025-12-03
 
 - (auto-added) tagged commit: 53a8ecd Add excel_merger.spec to repository and fix .gitignore
-
 
