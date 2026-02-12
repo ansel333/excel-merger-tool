@@ -344,47 +344,40 @@ def clean_existing_changelog(existing: str, known_tags: set, keep_versions: set)
 
 
 def dedupe_changelog(full_text: str) -> str:
-    # Merge sections with the same version, remove duplicate bullet lines while preserving order
-    parts = re.split(r'(?=^## )', full_text, flags=re.M)
-    if not parts:
-        return full_text
-    header = parts[0] if not parts[0].strip().startswith('##') else "# Changelog\n\n"
+    # Robustly parse sections, merge duplicate version sections and dedupe bullets.
+    header = "# Changelog\n\n"
+    sec_pat = re.compile(r"(?ms)^##\s*(v[0-9]+\.[0-9]+\.[0-9]+)\s*-\s*([0-9]{4}-[0-9]{2}-[0-9]{2})\s*\n(.*?)(?=^##\s*v|\Z)")
     sections = {}
     order = []
-    for sec in parts[1:]:
-        m = re.match(r"##\s*(v[0-9]+\.[0-9]+\.[0-9]+)\s*-\s*([0-9]{4}-[0-9]{2}-[0-9]{2})\s*\n\n", sec)
-        if m:
-            ver = m.group(1)
-            # extract bullets
-            bullets = [line for line in sec.splitlines()[2:] if line.strip()]
-            if ver not in sections:
-                sections[ver] = []
-                order.append((ver, sec.splitlines()[0]))
-            # append bullets preserving order and uniqueness
-            for b in bullets:
-                if b not in sections[ver]:
-                    sections[ver].append(b)
-        else:
-            # unknown-format section: include as-is under a pseudo-version key
-            key = f"_misc_{len(order)}"
-            order.append((key, None))
-            sections[key] = [sec]
-
+    misc_parts = []
+    for m in sec_pat.finditer(full_text):
+        ver = m.group(1)
+        date = m.group(2)
+        body = m.group(3).strip()
+        bullets = [line.strip() for line in body.splitlines() if line.strip()]
+        if ver not in sections:
+            sections[ver] = {"date": date, "bullets": []}
+            order.append(ver)
+        for b in bullets:
+            if b not in sections[ver]["bullets"]:
+                sections[ver]["bullets"].append(b)
+    # detect misc content before first section (ignore redundant '# Changelog')
+    first_section = sec_pat.search(full_text)
+    if first_section:
+        pre = full_text[: first_section.start()].strip()
+        if pre and not pre.strip().startswith('# Changelog'):
+            misc_parts.append(pre)
+    # build output: misc header, then versions in order (preserve order seen)
     out_lines = [header]
-    for key, header_line in order:
-        if key.startswith("_misc_"):
-            # write raw section
-            out_lines.append("\n".join(sections[key]))
-            out_lines.append("\n")
-            continue
-        # reconstruct section header from header_line if possible
-        if header_line:
-            out_lines.append(header_line)
-            out_lines.append("\n")
-        # write bullets
-        for b in sections[key]:
-            out_lines.append(b)
-            out_lines.append("\n")
+    for ver in order:
+        date = sections[ver]["date"]
+        out_lines.append(f"## {ver} - {date}\n\n")
+        for b in sections[ver]["bullets"]:
+            out_lines.append(b + "\n")
+        out_lines.append("\n")
+    # append misc parts if any
+    if misc_parts:
+        out_lines.append("\n".join(misc_parts))
         out_lines.append("\n")
     return "".join(out_lines)
 
@@ -476,43 +469,16 @@ def main(mode: Optional[str] = None):
                 remote_releases = get_remote_releases_gh(owner, repo)
             else:
                 # fallback: use git ls-remote to list tags on origin
-                try:
-                    ls = run(["git", "ls-remote", "--tags", "origin"]) or ""
-                    tags = []
-                    for line in ls.splitlines():
-                        parts = line.split()
-                        if len(parts) >= 2 and "refs/tags/" in parts[1]:
-                            tagref = parts[1].split("refs/tags/")[-1]
-                            # strip ^{} for annotated tags
-                            tag = tagref.replace("^{}", "")
-                            tags.append(tag)
-                    # pick semver-sorted latest
-                    def ver_key(t):
-                        try:
-                            return parse_version(t)
-                        except Exception:
-                            return (0, 0, 0)
-                    tags = sorted(set(tags), key=ver_key, reverse=True)
-                    if tags:
-                        remote_releases = [{"tag_name": tags[0], "published_at": "", "body": ""}]
-                except Exception:
-                    remote_releases = []
-        if remote_releases:
-            remote_latest = remote_releases[0].get("tag_name")
-            if remote_latest and remote_latest != latest_tag:
-                print(f"Remote latest release {remote_latest} differs from local latest {latest_tag}; re-evaluating from remote latest.")
-                latest_tag = remote_latest
-        else:
-            # try ls-remote even if earlier methods failed
-            try:
                 ls = run(["git", "ls-remote", "--tags", "origin"]) or ""
                 tags = []
                 for line in ls.splitlines():
                     parts = line.split()
                     if len(parts) >= 2 and "refs/tags/" in parts[1]:
                         tagref = parts[1].split("refs/tags/")[-1]
+                        # strip ^{} for annotated tags
                         tag = tagref.replace("^{}", "")
                         tags.append(tag)
+                # pick semver-sorted latest
                 def ver_key(t):
                     try:
                         return parse_version(t)
@@ -520,15 +486,61 @@ def main(mode: Optional[str] = None):
                         return (0, 0, 0)
                 tags = sorted(set(tags), key=ver_key, reverse=True)
                 if tags:
-                    remote_latest = tags[0]
-                    if remote_latest != latest_tag:
-                        print(f"Remote latest tag {remote_latest} (via ls-remote) differs from local latest {latest_tag}; re-evaluating from remote latest.")
-                        latest_tag = remote_latest
-            except Exception:
-                pass
+                    remote_releases = [{"tag_name": tags[0], "published_at": "", "body": ""}]
     except Exception:
-        # ignore remote fetch failures here
         remote_releases = []
+
+    # compute remote tag set for cleanup; if remote_releases empty, try ls-remote fallback
+    if remote_releases:
+        remote_tag_set = set([r.get("tag_name") for r in remote_releases if r.get("tag_name")])
+    else:
+        try:
+            ls = run(["git", "ls-remote", "--tags", "origin"]) or ""
+            tags = []
+            for line in ls.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and "refs/tags/" in parts[1]:
+                    tagref = parts[1].split("refs/tags/")[-1]
+                    tag = tagref.replace("^{}", "")
+                    tags.append(tag)
+            remote_tag_set = set(tags)
+        except Exception:
+            remote_tag_set = set()
+
+    local_tag_set = get_local_tags()
+    # tags present locally but missing remotely should be removed (cleanup)
+    local_only = local_tag_set - remote_tag_set
+    if local_only:
+        print(f"Local-only tags detected: {sorted(local_only)}")
+        for t in sorted(local_only):
+            if dry_run:
+                print(f"Would delete local tag: {t}")
+            else:
+                try:
+                    run(["git", "tag", "-d", t])
+                    print(f"Deleted local tag {t}")
+                except Exception as e:
+                    print(f"Failed to delete local tag {t}: {e}")
+        # refresh latest_tag after cleanup
+        latest_tag = get_latest_local_tag()
+
+    # determine remote_latest for re-evaluation
+    if remote_releases:
+        remote_latest = remote_releases[0].get("tag_name")
+    elif remote_tag_set:
+        def ver_key(t):
+            try:
+                return parse_version(t)
+            except Exception:
+                return (0, 0, 0)
+        tags_sorted = sorted(remote_tag_set, key=ver_key, reverse=True)
+        remote_latest = tags_sorted[0] if tags_sorted else None
+    else:
+        remote_latest = None
+
+    if remote_latest and remote_latest != latest_tag:
+        print(f"Remote latest release {remote_latest} differs from local latest {latest_tag}; re-evaluating from remote latest.")
+        latest_tag = remote_latest
 
     file_version = read_version_md()
     if latest_tag:
@@ -651,8 +663,23 @@ def main(mode: Optional[str] = None):
     local_tags_ordered = get_local_tags_list()
     augmented = ensure_tags_have_sections(cleaned_existing, local_tags_ordered)
 
-    full_text = "# Changelog\n\n" + header + body + augmented
+    # If `augmented` already contains a leading '# Changelog', strip it to avoid duplication
+    aug = augmented
+    if aug.lstrip().startswith("# Changelog"):
+        # remove first occurrence of the header and following blank lines
+        aug = re.sub(r"^# Changelog\s*\n", "", aug.lstrip(), count=1)
+    full_text = "# Changelog\n\n" + header + body + aug
     final_text = dedupe_changelog(full_text)
+    # Ensure only a single '# Changelog' header appears
+    final_text = re.sub(r'(?ms)(?:# Changelog\s*\n\s*)+', '# Changelog\n\n', final_text)
+    # Remove any other stray '# Changelog' occurrences after the first header
+    header_text = '# Changelog\n\n'
+    first_idx = final_text.find(header_text)
+    if first_idx != -1:
+        prefix = final_text[: first_idx + len(header_text)]
+        rest = final_text[first_idx + len(header_text):]
+        rest = rest.replace('# Changelog', '')
+        final_text = prefix + rest
     with open("CHANGELOG.md", "w", encoding="utf-8") as f:
         f.write(final_text)
 
