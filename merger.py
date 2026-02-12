@@ -43,7 +43,7 @@ class ExcelMerger:
             raise Exception(f"无法读取文件 {os.path.basename(file_path)}: {e}")
     
     @staticmethod
-    def merge_sheets(files, target_sheet, header_rows_count):
+    def merge_sheets(files, target_sheet, header_rows_count, sheet_mapping=None):
         """
         合并多个 Excel 文件的指定 Sheet
         
@@ -51,23 +51,40 @@ class ExcelMerger:
             files (list): Excel 文件路径列表
             target_sheet (str): 要合并的 Sheet 名称
             header_rows_count (int): 表头行数
+            sheet_mapping (dict): 文件路径到sheet名的映射（可选）
             
         Returns:
-            tuple: (header_rows, data_rows, file_order) 或 (None, None, None) 如果失败
+            tuple: (header_rows, data_rows, file_order, warnings) 或 (None, None, None, None) 如果失败
         """
         header_rows = []
         all_data_rows = []
         file_order = []
+        warnings = []
+        
+        if sheet_mapping is None:
+            sheet_mapping = {}
         
         for file_path in files:
             try:
                 wb = openpyxl.load_workbook(file_path, data_only=True)
                 
-                if target_sheet not in wb.sheetnames:
-                    print(f"  警告: Sheet '{target_sheet}' 在文件 {os.path.basename(file_path)} 中不存在")
+                # 确定要使用的sheet名称
+                if file_path in sheet_mapping:
+                    # 使用用户指定的sheet
+                    actual_sheet = sheet_mapping[file_path]
+                    if actual_sheet != target_sheet:
+                        warning_msg = f"文件 {os.path.basename(file_path)} 使用Sheet: '{actual_sheet}'（原目标: '{target_sheet}'）"
+                        print(f"  提示: {warning_msg}")
+                        warnings.append(warning_msg)
+                    ws = wb[actual_sheet]
+                elif target_sheet in wb.sheetnames:
+                    # 找到了目标sheet
+                    ws = wb[target_sheet]
+                else:
+                    # 找不到，且没有映射（不应该发生）
+                    print(f"  错误: Sheet '{target_sheet}' 在文件 {os.path.basename(file_path)} 中不存在")
+                    wb.close()
                     continue
-                
-                ws = wb[target_sheet]
                 
                 # 读取所有行
                 all_rows = []
@@ -112,7 +129,7 @@ class ExcelMerger:
                 continue
         
         if not all_data_rows or not header_rows:
-            return None, None, None
+            return None, None, None, None
         
         # 重新编号第一列（如果是数字列）
         if all_data_rows:
@@ -129,7 +146,7 @@ class ExcelMerger:
                     if row:
                         row[0] = i
         
-        return header_rows, all_data_rows, file_order
+        return header_rows, all_data_rows, file_order, warnings
     
     @staticmethod
     def create_output_file(header_rows, data_rows, target_sheet_name, file_order, all_sheet_names, directory="."):

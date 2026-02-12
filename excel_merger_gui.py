@@ -9,7 +9,7 @@ import sys
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QListWidget, QFileDialog, QSpinBox,
-    QLabel, QTextEdit, QMessageBox, QComboBox
+    QLabel, QTextEdit, QMessageBox, QComboBox, QDialog, QDialogButtonBox
 )
 from PyQt6.QtCore import Qt
 
@@ -205,10 +205,22 @@ class ExcelMergerGUI(QMainWindow):
             self.log(f"表头行数: {self.header_rows_count}")
             self.log(f"目标目录: {self.target_directory}")
             
+            # 检查每个文件是否有目标sheet，如果没有则让用户选择
+            sheet_mapping = self.check_and_prompt_missing_sheets(target_sheet)
+            if sheet_mapping is None:
+                # 用户取消了选择
+                self.log("操作已取消")
+                return
+            
             # 进行合并
-            header_rows, data_rows, file_order = ExcelMerger.merge_sheets(
-                self.selected_files, target_sheet, self.header_rows_count
+            header_rows, data_rows, file_order, warnings = ExcelMerger.merge_sheets(
+                self.selected_files, target_sheet, self.header_rows_count, sheet_mapping
             )
+            
+            # 显示警告信息
+            if warnings:
+                for warning in warnings:
+                    self.log(f"  警告: {warning}")
             
             if data_rows is None:
                 QMessageBox.warning(self, "警告", "没有找到任何有效数据！")
@@ -265,6 +277,32 @@ class ExcelMergerGUI(QMainWindow):
         )
         self.btn_merge.setEnabled(can_merge)
     
+    def check_and_prompt_missing_sheets(self, target_sheet):
+        """检查文件中是否缺少目标sheet，如果缺少则弹窗让用户选择"""
+        sheet_mapping = {}
+        
+        for file_path in self.selected_files:
+            try:
+                available_sheets = ExcelMerger.get_sheet_names(file_path)
+                
+                if target_sheet not in available_sheets:
+                    # 弹出对话框让用户选择
+                    filename = os.path.basename(file_path)
+                    dialog = SheetSelectionDialog(filename, target_sheet, available_sheets, self)
+                    
+                    if dialog.exec() == QDialog.DialogCode.Accepted:
+                        selected_sheet = dialog.get_selected_sheet()
+                        sheet_mapping[file_path] = selected_sheet
+                        self.log(f"文件 {filename} 将使用 Sheet: '{selected_sheet}'")
+                    else:
+                        # 用户取消了
+                        return None
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"读取文件失败: {e}")
+                return None
+        
+        return sheet_mapping
+    
     def log(self, message):
         """输出日志"""
         self.log_text.append(message)
@@ -272,6 +310,50 @@ class ExcelMergerGUI(QMainWindow):
         self.log_text.verticalScrollBar().setValue(
             self.log_text.verticalScrollBar().maximum()
         )
+
+
+class SheetSelectionDialog(QDialog):
+    """Sheet选择对话框"""
+    def __init__(self, filename, target_sheet, available_sheets, parent=None):
+        super().__init__(parent)
+        self.available_sheets = available_sheets
+        self.init_ui(filename, target_sheet)
+    
+    def init_ui(self, filename, target_sheet):
+        """初始化对话框UI"""
+        self.setWindowTitle("选择Sheet")
+        self.setModal(True)
+        self.setMinimumWidth(400)
+        
+        layout = QVBoxLayout()
+        layout.setSpacing(12)
+        
+        # 说明文本
+        info_label = QLabel(
+            f"文件 <b>{filename}</b> 中找不到Sheet: <b>{target_sheet}</b>\n\n"
+            f"请选择要使用的Sheet:"
+        )
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+        
+        # Sheet选择下拉框
+        self.sheet_combo = QComboBox()
+        self.sheet_combo.addItems(self.available_sheets)
+        layout.addWidget(self.sheet_combo)
+        
+        # 按钮
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+        
+        self.setLayout(layout)
+    
+    def get_selected_sheet(self):
+        """获取用户选择的sheet名称"""
+        return self.sheet_combo.currentText()
 
 
 def main():
