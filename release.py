@@ -13,12 +13,22 @@ import subprocess
 import json
 from datetime import datetime
 from typing import List, Tuple, Optional
+import argparse
 
 import requests
 
 
 def run(cmd: List[str]) -> str:
     return subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode().strip()
+
+
+def get_uncommitted_changes() -> List[str]:
+    try:
+        out = run(["git", "status", "--porcelain"]) or ""
+        lines = [l.strip() for l in out.splitlines() if l.strip()]
+        return lines
+    except Exception:
+        return []
 
 
 def get_repo() -> Tuple[str, str]:
@@ -56,6 +66,9 @@ def get_latest_release(owner: str, repo: str, token: str) -> Optional[dict]:
         return r.json()
     if r.status_code == 404:
         return None
+    if r.status_code in (401, 403):
+        # Authentication / permission error
+        raise PermissionError(f"GitHub API authentication failed (status {r.status_code}).")
     r.raise_for_status()
 
 
@@ -129,9 +142,11 @@ def prepend_changelog(version: str, commits: List[Tuple[str, str]]):
     body = "\n".join(body_lines) + "\n\n"
 
     existing = ""
-    if os.path.exists("CHANGELOG.md"):
+    changelog_file_exists = os.path.exists("CHANGELOG.md")
+    if changelog_file_exists:
         with open("CHANGELOG.md", "r", encoding="utf-8") as f:
             existing = f.read()
+    is_empty_changelog = changelog_file_exists and (not existing.strip())
 
     with open("CHANGELOG.md", "w", encoding="utf-8") as f:
         f.write(changelog + header + body + existing)
@@ -142,31 +157,463 @@ def create_release_on_github(owner: str, repo: str, tag: str, name: str, body: s
     headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
     payload = {"tag_name": tag, "name": name, "body": body, "draft": draft}
     r = requests.post(url, headers=headers, data=json.dumps(payload))
+    if r.status_code in (401, 403):
+        raise PermissionError(f"GitHub API authentication failed when creating release (status {r.status_code}).")
     r.raise_for_status()
     return r.json()
 
 
-def main(dry_run=False):
+def gh_installed() -> bool:
+    try:
+        run(["gh", "--version"])
+        return True
+    except Exception:
+        return False
+
+
+def gh_get_latest_release(owner: str, repo: str) -> Optional[str]:
+    try:
+        out = run(["gh", "release", "view", "--repo", f"{owner}/{repo}", "--json", "tagName"]) 
+        j = json.loads(out)
+        return j.get("tagName")
+    except subprocess.CalledProcessError:
+        return None
+    except Exception:
+        return None
+
+
+def get_latest_local_tag() -> Optional[str]:
+    try:
+        t = run(["git", "describe", "--tags", "--abbrev=0"]) 
+        return t
+    except Exception:
+        return None
+
+
+def get_local_tags() -> set:
+    try:
+        out = run(["git", "tag", "--list"]) or ""
+        return set([t.strip() for t in out.splitlines() if t.strip()])
+    except Exception:
+        return set()
+
+
+def get_local_tags_list() -> list:
+    try:
+        out = run(["git", "tag", "--list", "--sort=-v:refname"]) or ""
+        return [t.strip() for t in out.splitlines() if t.strip()]
+    except Exception:
+        return []
+
+
+def get_tag_date(tag: str) -> Optional[str]:
+    try:
+        d = run(["git", "log", "-1", "--format=%ad", "--date=short", tag])
+        return d.strip()
+    except Exception:
+        return None
+
+
+def get_tag_commit_summary(tag: str) -> str:
+    try:
+        s = run(["git", "show", "-s", "--format=%h %s", tag])
+        return s.strip()
+    except Exception:
+        return ""
+
+
+def ensure_tags_have_sections(existing: str, tag_list: list) -> str:
+    # Parse existing versions
+    present = set()
+    parts = re.split(r'(?=^## )', existing, flags=re.M)
+    for sec in parts[1:]:
+        m = re.match(r"##\s*(v[0-9]+\.[0-9]+\.[0-9]+)", sec)
+        if m:
+            present.add(m.group(1))
+
+    added = []
+    for tag in tag_list:
+        if tag not in present:
+            date = get_tag_date(tag) or datetime.utcnow().strftime("%Y-%m-%d")
+            summary = get_tag_commit_summary(tag)
+            sec = f"## {tag} - {date}\n\n- (auto-added) tagged commit: {summary}\n\n"
+            added.append(sec)
+
+    # append added sections after existing text
+    if added:
+        return existing + "\n" + "".join(added)
+    return existing
+
+
+def get_github_release_tags(owner: str, repo: str, token: str) -> set:
+    try:
+        url = f"https://api.github.com/repos/{owner}/{repo}/releases?per_page=100"
+        headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+        r = requests.get(url, headers=headers)
+        r.raise_for_status()
+        items = r.json()
+        return set([i.get("tag_name") for i in items if i.get("tag_name")])
+    except Exception:
+        return set()
+
+
+def get_gh_release_tags(owner: str, repo: str) -> set:
+    try:
+        out = run(["gh", "release", "list", "--repo", f"{owner}/{repo}", "--limit", "200", "--json", "tagName"]) 
+        j = json.loads(out)
+        return set([item.get("tagName") for item in j if item.get("tagName")])
+    except Exception:
+        return set()
+
+
+def get_remote_releases_api(owner: str, repo: str, token: str) -> list:
+    try:
+        url = f"https://api.github.com/repos/{owner}/{repo}/releases?per_page=200"
+        headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+        r = requests.get(url, headers=headers)
+        r.raise_for_status()
+        items = r.json()
+        # normalize to dicts with tag_name, published_at, body
+        out = []
+        for i in items:
+            out.append({
+                "tag_name": i.get("tag_name"),
+                "published_at": i.get("published_at") or "",
+                "body": i.get("body") or "",
+            })
+        # sort by published_at desc (missing dates last)
+        out.sort(key=lambda x: x.get("published_at") or "", reverse=True)
+        return out
+    except Exception:
+        return []
+
+
+def get_remote_releases_gh(owner: str, repo: str) -> list:
+    try:
+        out = run(["gh", "release", "list", "--repo", f"{owner}/{repo}", "--limit", "200", "--json", "tagName,publishedAt,body"]) 
+        j = json.loads(out)
+        out_list = []
+        for item in j:
+            out_list.append({
+                "tag_name": item.get("tagName"),
+                "published_at": item.get("publishedAt") or "",
+                "body": item.get("body") or "",
+            })
+        out_list.sort(key=lambda x: x.get("published_at") or "", reverse=True)
+        return out_list
+    except Exception:
+        return []
+
+
+def parse_changelog_sections(text: str) -> Tuple[list, dict]:
+    # returns (ordered_versions, mapping version->section body)
+    parts = re.split(r'(?=^## )', text, flags=re.M)
+    mapping = {}
+    order = []
+    if not parts:
+        return order, mapping
+    for sec in parts[1:]:
+        m = re.match(r"##\s*(v[0-9]+\.[0-9]+\.[0-9]+)\s*-\s*([0-9]{4}-[0-9]{2}-[0-9]{2})\s*\n\n", sec)
+        if m:
+            ver = m.group(1)
+            mapping[ver] = sec
+            order.append(ver)
+    return order, mapping
+
+
+def clean_existing_changelog(existing: str, known_tags: set, keep_versions: set) -> str:
+    # Keep header before first section
+    parts = re.split(r'(?=^## )', existing, flags=re.M)
+    if not parts:
+        return existing
+    header = parts[0] if not parts[0].strip().startswith('##') else "# Changelog\n\n"
+    kept = []
+    for sec in parts[1:]:
+        m = re.match(r"##\s*(v[0-9]+\.[0-9]+\.[0-9]+)", sec)
+        if m:
+            ver = m.group(1)
+            if ver in known_tags or ver in keep_versions:
+                kept.append(sec)
+            else:
+                # skip this generated/invalid section
+                continue
+        else:
+            # keep unknown-format sections
+            kept.append(sec)
+    return header + "".join(kept)
+
+
+def dedupe_changelog(full_text: str) -> str:
+    # Merge sections with the same version, remove duplicate bullet lines while preserving order
+    parts = re.split(r'(?=^## )', full_text, flags=re.M)
+    if not parts:
+        return full_text
+    header = parts[0] if not parts[0].strip().startswith('##') else "# Changelog\n\n"
+    sections = {}
+    order = []
+    for sec in parts[1:]:
+        m = re.match(r"##\s*(v[0-9]+\.[0-9]+\.[0-9]+)\s*-\s*([0-9]{4}-[0-9]{2}-[0-9]{2})\s*\n\n", sec)
+        if m:
+            ver = m.group(1)
+            # extract bullets
+            bullets = [line for line in sec.splitlines()[2:] if line.strip()]
+            if ver not in sections:
+                sections[ver] = []
+                order.append((ver, sec.splitlines()[0]))
+            # append bullets preserving order and uniqueness
+            for b in bullets:
+                if b not in sections[ver]:
+                    sections[ver].append(b)
+        else:
+            # unknown-format section: include as-is under a pseudo-version key
+            key = f"_misc_{len(order)}"
+            order.append((key, None))
+            sections[key] = [sec]
+
+    out_lines = [header]
+    for key, header_line in order:
+        if key.startswith("_misc_"):
+            # write raw section
+            out_lines.append("\n".join(sections[key]))
+            out_lines.append("\n")
+            continue
+        # reconstruct section header from header_line if possible
+        if header_line:
+            out_lines.append(header_line)
+            out_lines.append("\n")
+        # write bullets
+        for b in sections[key]:
+            out_lines.append(b)
+            out_lines.append("\n")
+        out_lines.append("\n")
+    return "".join(out_lines)
+
+
+def create_release_with_gh(owner: str, repo: str, tag: str, name: str, body: str, draft=False) -> dict:
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, encoding="utf-8", suffix=".md") as tf:
+        tf.write(body)
+        tf.flush()
+        tmpname = tf.name
+    cmd = [
+        "gh",
+        "release",
+        "create",
+        tag,
+        "-t",
+        name,
+        "-F",
+        tmpname,
+        "--repo",
+        f"{owner}/{repo}",
+    ]
+    if draft:
+        cmd.append("--draft")
+    out = run(cmd)
+    # gh prints URL on success; return a minimal dict
+    return {"html_url": out.strip()}
+
+
+def main(mode: Optional[str] = None):
     token = os.environ.get("GITHUB_TOKEN")
-    if not token:
-        print("Error: GITHUB_TOKEN not set in environment")
-        sys.exit(1)
+    # mode: one of 'preview' (dry-run), 'release' (real), 'dry-run' (alias)
+    if mode is None:
+        # interactive prompt
+        print("No mode option provided. Choose action:")
+        print("  1) preview  - show what will be released (safe dry-run)")
+        print("  2) dry-run  - same as preview")
+        print("  3) release  - perform the release (will create tag and push)")
+        choice = input("Enter 1,2,3 (default 1): ").strip() or "1"
+        if choice == "3":
+            mode = "release"
+        elif choice == "2":
+            mode = "dry-run"
+        else:
+            mode = "preview"
 
-    owner, repo = get_repo()
-    latest = get_latest_release(owner, repo, token)
-    latest_tag = latest["tag_name"] if latest else None
-    print(f"Latest release tag: {latest_tag}")
+    dry_run = (mode != "release")
 
-    current_version = read_version_md()
-    if current_version:
-        current_parsed = parse_version(current_version)
-    elif latest_tag:
+    owner = repo = None
+    latest = None
+    latest_tag = None
+    # Prefer local git tags (most reliable). If none found, try GitHub releases (API with token or gh CLI).
+    latest_tag = get_latest_local_tag()
+    if latest_tag:
+        print(f"Latest release tag (local): {latest_tag}")
+    else:
+        if token:
+            owner, repo = get_repo()
+            latest = get_latest_release(owner, repo, token)
+            latest_tag = latest["tag_name"] if latest else None
+            print(f"Latest release tag (API): {latest_tag}")
+        else:
+            if gh_installed():
+                try:
+                    owner, repo = get_repo()
+                    latest_tag = gh_get_latest_release(owner, repo)
+                    print(f"Latest release tag (gh): {latest_tag}")
+                except Exception:
+                    latest_tag = None
+            if not latest_tag:
+                if dry_run:
+                    print("No GitHub token and no tags found via gh CLI or locally; proceeding in dry-run mode using full commit history.")
+                else:
+                    print("Error: GITHUB_TOKEN not set and no tags found locally or via gh CLI.")
+                    sys.exit(1)
+
+    # If possible, fetch remote releases early and prefer remote latest as the base for computing commits.
+    remote_releases = []
+    try:
+        if not owner or not repo:
+            try:
+                owner, repo = get_repo()
+            except Exception:
+                owner = repo = None
+        if owner and repo:
+            if token:
+                remote_releases = get_remote_releases_api(owner, repo, token)
+            elif gh_installed():
+                remote_releases = get_remote_releases_gh(owner, repo)
+            else:
+                # fallback: use git ls-remote to list tags on origin
+                try:
+                    ls = run(["git", "ls-remote", "--tags", "origin"]) or ""
+                    tags = []
+                    for line in ls.splitlines():
+                        parts = line.split()
+                        if len(parts) >= 2 and "refs/tags/" in parts[1]:
+                            tagref = parts[1].split("refs/tags/")[-1]
+                            # strip ^{} for annotated tags
+                            tag = tagref.replace("^{}", "")
+                            tags.append(tag)
+                    # pick semver-sorted latest
+                    def ver_key(t):
+                        try:
+                            return parse_version(t)
+                        except Exception:
+                            return (0, 0, 0)
+                    tags = sorted(set(tags), key=ver_key, reverse=True)
+                    if tags:
+                        remote_releases = [{"tag_name": tags[0], "published_at": "", "body": ""}]
+                except Exception:
+                    remote_releases = []
+        if remote_releases:
+            remote_latest = remote_releases[0].get("tag_name")
+            if remote_latest and remote_latest != latest_tag:
+                print(f"Remote latest release {remote_latest} differs from local latest {latest_tag}; re-evaluating from remote latest.")
+                latest_tag = remote_latest
+        else:
+            # try ls-remote even if earlier methods failed
+            try:
+                ls = run(["git", "ls-remote", "--tags", "origin"]) or ""
+                tags = []
+                for line in ls.splitlines():
+                    parts = line.split()
+                    if len(parts) >= 2 and "refs/tags/" in parts[1]:
+                        tagref = parts[1].split("refs/tags/")[-1]
+                        tag = tagref.replace("^{}", "")
+                        tags.append(tag)
+                def ver_key(t):
+                    try:
+                        return parse_version(t)
+                    except Exception:
+                        return (0, 0, 0)
+                tags = sorted(set(tags), key=ver_key, reverse=True)
+                if tags:
+                    remote_latest = tags[0]
+                    if remote_latest != latest_tag:
+                        print(f"Remote latest tag {remote_latest} (via ls-remote) differs from local latest {latest_tag}; re-evaluating from remote latest.")
+                        latest_tag = remote_latest
+            except Exception:
+                pass
+    except Exception:
+        # ignore remote fetch failures here
+        remote_releases = []
+
+    file_version = read_version_md()
+    if latest_tag:
         current_parsed = parse_version(latest_tag)
+    elif file_version:
+        current_parsed = parse_version(file_version)
     else:
         current_parsed = (0, 0, 0)
 
+    # Read existing changelog early so we can detect if it's empty
+    existing = ""
+    changelog_file_exists = os.path.exists("CHANGELOG.md")
+    if changelog_file_exists:
+        with open("CHANGELOG.md", "r", encoding="utf-8") as f:
+            existing = f.read()
+    is_empty_changelog = changelog_file_exists and (not existing.strip())
+
+    # Always prefer remote releases as source of truth when available.
+    regenerate_all = False
+    remote_releases = []
+    try:
+        if not owner:
+            try:
+                owner, repo = get_repo()
+            except Exception:
+                owner = repo = None
+
+        if owner and repo:
+            if token:
+                remote_releases = get_remote_releases_api(owner, repo, token)
+            elif gh_installed():
+                remote_releases = get_remote_releases_gh(owner, repo)
+            else:
+                # fallback: attempt to list remote tags (no release bodies)
+                ls = run(["git", "ls-remote", "--tags", "origin"]) or ""
+                remote_releases = []
+                for line in ls.splitlines():
+                    parts = line.split()
+                    if len(parts) >= 2 and "refs/tags/" in parts[1]:
+                        tag = parts[1].split("refs/tags/")[-1]
+                        remote_releases.append({"tag_name": tag, "published_at": "", "body": ""})
+            # if we got remote releases, compare latest with local changelog
+            if remote_releases:
+                remote_latest = remote_releases[0].get("tag_name")
+                order_map = parse_changelog_sections(existing)
+                local_order, local_map = order_map
+                local_has_latest = remote_latest in local_map
+                remote_latest_body = (remote_releases[0].get("body") or "").strip()
+                local_latest_body = ""
+                if local_has_latest:
+                    local_latest_body = local_map[remote_latest]
+                # If latest remote release is missing or differs from local, regenerate entire changelog
+                if (not local_has_latest) or (remote_latest_body and remote_latest_body not in local_latest_body):
+                    print(f"Remote latest release {remote_latest} differs from local changelog — regenerating full changelog from remote state")
+                    regenerate_all = True
+    except Exception:
+        # any failure fetching remote releases should not block local flow
+        regenerate_all = False
+
+    if regenerate_all:
+        # build changelog from remote_releases; include body when present, else placeholder
+        parts = []
+        for r in remote_releases:
+            tag = r.get("tag_name")
+            date = r.get("published_at")[:10] if r.get("published_at") else (get_tag_date(tag) or datetime.utcnow().strftime("%Y-%m-%d"))
+            body_text = r.get("body") or ""
+            if not body_text:
+                summary = get_tag_commit_summary(tag)
+                body_text = f"- (auto-added) tagged commit: {summary}"
+            sec = f"## {tag} - {date}\n\n{body_text}\n\n"
+            parts.append(sec)
+        full_text = "# Changelog\n\n" + "".join(parts)
+        final_text = dedupe_changelog(full_text)
+        if not dry_run:
+            with open("CHANGELOG.md", "w", encoding="utf-8") as f:
+                f.write(final_text)
+        else:
+            print("(preview) regenerated changelog from remote releases:\n")
+            print(final_text[:2000])
+        # update existing variable so later flow uses regenerated content
+        existing = final_text
+        is_empty_changelog = False
+
     commits = get_commits_since(latest_tag)
-    if not commits:
+    if not commits and not is_empty_changelog:
         print("No commits since last release; nothing to do.")
         return
 
@@ -176,31 +623,116 @@ def main(dry_run=False):
 
     print(f"Bump level: {bump}, new version: {new_version}")
 
-    # create changelog
-    prepend_changelog(new_version, commits)
+    # determine known tags (local + remote via API or gh if available)
+    known = get_local_tags()
+    if token and owner and repo:
+        known |= get_github_release_tags(owner, repo, token)
+    elif gh_installed() and owner and repo:
+        known |= get_gh_release_tags(owner, repo)
+
+    # create changelog (clean old invalid entries)
+    changelog_file_exists = os.path.exists("CHANGELOG.md")
+    is_empty_changelog = changelog_file_exists and (not existing.strip())
+
+    # build new top section
+    date = datetime.utcnow().strftime("%Y-%m-%d")
+    header = f"## {new_version} - {date}\n\n"
+    body_lines = [f"- {msg} ({sha[:7]})" for sha, msg in commits]
+    body = "\n".join(body_lines) + "\n\n"
+
+    cleaned_existing = clean_existing_changelog(existing, known, keep_versions={new_version})
+
+    # If changelog was empty, ensure we generate sections for existing tags
+    if is_empty_changelog:
+        local_tags_ordered = get_local_tags_list()
+        cleaned_existing = ensure_tags_have_sections(cleaned_existing, local_tags_ordered)
+
+    # ensure every known local tag has a changelog section (if not already done)
+    local_tags_ordered = get_local_tags_list()
+    augmented = ensure_tags_have_sections(cleaned_existing, local_tags_ordered)
+
+    full_text = "# Changelog\n\n" + header + body + augmented
+    final_text = dedupe_changelog(full_text)
+    with open("CHANGELOG.md", "w", encoding="utf-8") as f:
+        f.write(final_text)
 
     # update version.md
     write_version_md(new_version)
 
-    # git add, commit, tag, push
-    run(["git", "add", "version.md", "CHANGELOG.md"]) if not dry_run else print("git add version.md CHANGELOG.md")
-    run(["git", "commit", "-m", f"chore(release): {new_version}"]) if not dry_run else print(f"git commit -m chore(release): {new_version}")
-    run(["git", "tag", new_version]) if not dry_run else print(f"git tag {new_version}")
-    run(["git", "push"]) if not dry_run else print("git push")
-    run(["git", "push", "origin", new_version]) if not dry_run else print(f"git push origin {new_version}")
+    # If there were no commits since latest tag but changelog was empty,
+    # we regenerated changelog for existing tags and should re-create the release
+    recreate_release_for_tag = False
+    existing_tag_to_release = None
+    if not commits and is_empty_changelog:
+        # re-use the latest tag
+        existing_tag_to_release = latest_tag or read_version_md()
+        if existing_tag_to_release:
+            print(f"No new commits, but changelog was empty — will regenerate changelog and recreate release for {existing_tag_to_release}")
+            recreate_release_for_tag = True
 
-    # create release on GitHub
+    if not recreate_release_for_tag:
+        # git add, commit, tag, push for a new release
+        run(["git", "add", "version.md", "CHANGELOG.md"]) if not dry_run else print("git add version.md CHANGELOG.md")
+        run(["git", "commit", "-m", f"chore(release): {new_version}"]) if not dry_run else print(f"git commit -m chore(release): {new_version}")
+        run(["git", "tag", new_version]) if not dry_run else print(f"git tag {new_version}")
+        run(["git", "push"]) if not dry_run else print("git push")
+        run(["git", "push", "origin", new_version]) if not dry_run else print(f"git push origin {new_version}")
+
+    # create release on GitHub (use token or gh CLI if available)
     with open("CHANGELOG.md", "r", encoding="utf-8") as f:
         changelog_body = f.read().splitlines()
     # only include top section
     body = "\n".join(changelog_body[:2000])
+
     if dry_run:
-        print("Would create GitHub release with body:\n", body[:1000])
+        print("Dry-run / preview: would create GitHub release with body:\n")
+        print(body[:1000])
+        return
+
+    # Before performing a real release, check for uncommitted changes
+    changes = get_uncommitted_changes()
+    if changes:
+        print("Found uncommitted/unstaged changes in the working tree:")
+        for c in changes:
+            print(f"  {c}")
+        ans = input("You have uncommitted changes. Continue release anyway? [y/N]: ").strip().lower()
+        if ans not in ("y", "yes"):
+            print("Aborting release. Commit or stash your changes and retry.")
+            sys.exit(1)
+
+    if token:
+        try:
+            rel = create_release_on_github(owner, repo, new_version, new_version, body, token)
+            print(f"Created release: {rel.get('html_url')}")
+        except PermissionError as e:
+            print(str(e))
+            print("Permission error with GitHub API. Try: gh auth login or set GITHUB_TOKEN.")
+            sys.exit(1)
+    elif gh_installed():
+        try:
+            owner, repo = owner or get_repo()
+            rel = create_release_with_gh(owner, repo, new_version, new_version, body)
+            print(f"Created release (gh): {rel.get('html_url')}")
+        except Exception as e:
+            print(f"gh CLI release failed: {e}")
+            print("If not authenticated, run: gh auth login")
+            sys.exit(1)
     else:
-        rel = create_release_on_github(owner, repo, new_version, new_version, body, token)
-        print(f"Created release: {rel.get('html_url')}")
+        print("No GITHUB_TOKEN and gh CLI not available to create release.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    dry = "--dry-run" in sys.argv
-    main(dry_run=dry)
+    parser = argparse.ArgumentParser(description="Release helper: preview or perform releases")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--preview", action="store_true", help="Preview the release (dry-run)")
+    group.add_argument("--dry-run", action="store_true", help="Alias for --preview")
+    group.add_argument("--release", action="store_true", help="Perform the release")
+    args = parser.parse_args()
+    if args.release:
+        mode = "release"
+    elif args.preview or args.dry_run:
+        mode = "preview"
+    else:
+        mode = None
+    main(mode=mode)
