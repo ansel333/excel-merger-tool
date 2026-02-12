@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.1 - 2026-02-12
+
+- chore(release): pre-release auto-commit (7f3975b)
+
 ## v1.1.0 - 2026-02-12
 
 - chore(release): pre-release auto-commit (93f1409)
