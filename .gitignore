@@ -59,5 +59,6 @@ htmlcov/
 output/
 temp/
 tmp/
+testing_files/
 .env
 .env.local
