@@ -737,7 +737,8 @@ def main(mode: Optional[str] = None):
             sys.exit(1)
     elif gh_installed():
         try:
-            owner, repo = owner or get_repo()
+            if not owner:
+                owner, repo = get_repo()
             rel = create_release_with_gh(owner, repo, new_version, new_version, body)
             print(f"Created release (gh): {rel.get('html_url')}")
         except Exception as e:
