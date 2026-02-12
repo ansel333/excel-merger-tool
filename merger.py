@@ -8,6 +8,7 @@ import os
 import glob
 from datetime import datetime
 import openpyxl
+import xlrd
 from openpyxl.utils import get_column_letter
 
 
@@ -35,12 +36,99 @@ class ExcelMerger:
     def get_sheet_names(file_path):
         """获取 Excel 文件的 Sheet 名称列表"""
         try:
-            wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
-            sheet_names = wb.sheetnames
-            wb.close()
+            wb, wb_type = ExcelMerger._load_workbook(file_path)
+            sheet_names = ExcelMerger._get_sheet_names(wb, wb_type)
+            ExcelMerger._close_workbook(wb, wb_type)
             return sheet_names
         except Exception as e:
             raise Exception(f"无法读取文件 {os.path.basename(file_path)}: {e}")
+    
+    @staticmethod
+    def _load_workbook(file_path):
+        """根据文件内容加载工作簿，自动检测格式"""
+        import tempfile
+        
+        # 检查文件头来判断实际格式
+        with open(file_path, 'rb') as f:
+            header = f.read(8)
+        
+        # 如果是ZIP格式（XLSX/XLSM等），用openpyxl
+        if header.startswith(b'PK\x03\x04'):
+            # 临时重命名为.xlsx来欺骗openpyxl
+            temp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as temp_file:
+                    temp_path = temp_file.name
+                
+                # 复制文件内容到临时文件
+                with open(file_path, 'rb') as src, open(temp_path, 'wb') as dst:
+                    dst.write(src.read())
+                
+                wb = openpyxl.load_workbook(temp_path, data_only=True)
+                os.unlink(temp_path)  # 删除临时文件
+                return wb, 'xlsx'
+            except Exception as e:
+                if temp_path and os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                raise Exception(f"无法读取ZIP格式Excel文件: {e}")
+        
+        # 如果是OLE2格式（XLS），用xlrd
+        elif header.startswith(b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'):
+            try:
+                wb = xlrd.open_workbook(file_path, on_demand=True)
+                return wb, 'xls'
+            except Exception as e:
+                raise Exception(f"无法读取OLE2格式Excel文件: {e}")
+        
+        # 未知格式
+        else:
+            file_ext = os.path.splitext(file_path)[1].lower()
+            raise Exception(f"无法识别的Excel文件格式。文件扩展名: {file_ext}, 文件头: {header.hex()}")
+    
+    @staticmethod
+    def _get_sheet_names(wb, wb_type):
+        """获取工作簿的sheet名称"""
+        if wb_type == 'xls':
+            return wb.sheet_names()
+        else:
+            return wb.sheetnames
+    
+    @staticmethod
+    def _get_sheet(wb, wb_type, sheet_name):
+        """获取指定的sheet"""
+        if wb_type == 'xls':
+            try:
+                sheet_index = wb.sheet_names().index(sheet_name)
+                return wb.sheet_by_index(sheet_index)
+            except ValueError:
+                return None
+        else:
+            return wb[sheet_name] if sheet_name in wb.sheetnames else None
+    
+    @staticmethod
+    def _read_sheet_rows(sheet, wb_type):
+        """读取sheet的所有行"""
+        all_rows = []
+        if wb_type == 'xls':
+            for row_idx in range(sheet.nrows):
+                row = []
+                for col_idx in range(sheet.ncols):
+                    cell_value = sheet.cell_value(row_idx, col_idx)
+                    row.append(cell_value)
+                all_rows.append(row)
+        else:
+            for row in sheet.iter_rows(values_only=True):
+                all_rows.append(list(row) if row else [])
+        return all_rows
+    
+    @staticmethod
+    def _close_workbook(wb, wb_type):
+        """关闭工作簿"""
+        if wb_type == 'xls':
+            wb.release_resources()
+            del wb
+        else:
+            wb.close()
     
     @staticmethod
     def merge_sheets(files, target_sheet, header_rows_count, sheet_mapping=None):
@@ -66,7 +154,8 @@ class ExcelMerger:
         
         for file_path in files:
             try:
-                wb = openpyxl.load_workbook(file_path, data_only=True)
+                wb, wb_type = ExcelMerger._load_workbook(file_path)
+                sheet_names = ExcelMerger._get_sheet_names(wb, wb_type)
                 
                 # 确定要使用的sheet名称
                 if file_path in sheet_mapping:
@@ -76,24 +165,34 @@ class ExcelMerger:
                         warning_msg = f"文件 {os.path.basename(file_path)} 使用Sheet: '{actual_sheet}'（原目标: '{target_sheet}'）"
                         print(f"  提示: {warning_msg}")
                         warnings.append(warning_msg)
-                    ws = wb[actual_sheet]
-                elif target_sheet in wb.sheetnames:
+                elif target_sheet in sheet_names:
                     # 找到了目标sheet
-                    ws = wb[target_sheet]
+                    actual_sheet = target_sheet
                 else:
-                    # 找不到，且没有映射（不应该发生）
-                    print(f"  错误: Sheet '{target_sheet}' 在文件 {os.path.basename(file_path)} 中不存在")
-                    wb.close()
+                    # 找不到目标sheet，使用该文件的第一个可用sheet并记录警告
+                    if sheet_names:
+                        actual_sheet = sheet_names[0]
+                        warning_msg = f"Sheet '{target_sheet}' 在文件 {os.path.basename(file_path)} 中不存在，使用第一个Sheet: '{actual_sheet}'"
+                        print(f"  警告: {warning_msg}")
+                        warnings.append(warning_msg)
+                    else:
+                        print(f"  错误: 文件 {os.path.basename(file_path)} 没有任何Sheet")
+                        ExcelMerger._close_workbook(wb, wb_type)
+                        continue
+                
+                # 获取sheet对象
+                ws = ExcelMerger._get_sheet(wb, wb_type, actual_sheet)
+                if ws is None:
+                    print(f"  错误: 无法获取Sheet '{actual_sheet}'")
+                    ExcelMerger._close_workbook(wb, wb_type)
                     continue
                 
                 # 读取所有行
-                all_rows = []
-                for row in ws.iter_rows(values_only=True):
-                    all_rows.append(list(row) if row else [])
+                all_rows = ExcelMerger._read_sheet_rows(ws, wb_type)
                 
                 if not all_rows:
-                    print(f"  警告: Sheet '{target_sheet}' 为空")
-                    wb.close()
+                    print(f"  警告: Sheet '{actual_sheet}' 为空")
+                    ExcelMerger._close_workbook(wb, wb_type)
                     continue
                 
                 # 保存表头行
@@ -122,7 +221,7 @@ class ExcelMerger:
                         file_order.append(os.path.basename(file_path))
                         print(f"  提取了 {len(filtered_data_rows)} 行有效数据（共读取 {len(data_rows)} 行）")
                 
-                wb.close()
+                ExcelMerger._close_workbook(wb, wb_type)
                 
             except Exception as e:
                 print(f"  错误: 无法读取文件 {os.path.basename(file_path)}: {e}")

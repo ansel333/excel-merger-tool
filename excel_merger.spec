@@ -10,6 +10,8 @@ a = Analysis(
     hiddenimports=[
         'merger',
         'styles',
+        'xlrd',
+        'xlrd.xlsx',
     ],
     hookspath=[],
     hooksconfig={},
